@@ -173,6 +173,14 @@ func (fw *fileWriter) Close() error {
 	return nil
 }
 
+type nopCloser struct {
+	io.Writer
+}
+
+func (nopCloser) Close() error {
+	return nil
+}
+
 // NewWriter returns a new Writer writing a 7-zip archive to w.
 // The provided io.WriteSeeker must allow seeking back to the start
 // to write the final signature header.
@@ -216,12 +224,27 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		}
 	}
 
+	isDir := fh.Mode().IsDir()
+
+	fh.isEmptyStream = isDir
+	fh.isEmptyFile = false
+
 	dictCap := 8 * 1024 * 1024 // 8 MiB dictionary
 	fi := &fileInfo{
 		fh:       *fh,
 		propByte: lzma.EncodeDictCap(int64(dictCap)),
 	}
 	w.files = append(w.files, fi)
+
+	if fh.isEmptyStream {
+		w.current = &fileWriter{
+			w:         w,
+			fi:        fi,
+			lzmaW:     &nopCloser{Writer: io.Discard},
+			crc32Hash: crc32.NewIEEE(),
+		}
+		return w.current, nil
+	}
 
 	if w.activeFold == nil || !w.solid {
 		if w.activeFold != nil {
