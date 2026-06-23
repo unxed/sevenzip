@@ -87,3 +87,48 @@ func TestWriterBasic(t *testing.T) {
 	assert.Equal(t, []byte{}, out3)
 	rc3.Close()
 }
+
+func TestWriterSolid(t *testing.T) {
+	t.Parallel()
+
+	f, err := os.CreateTemp("", "sevenzip-solid-*.7z")
+	require.NoError(t, err)
+	defer os.Remove(f.Name())
+
+	w, err := NewWriter(f, WithSolid(true))
+	require.NoError(t, err)
+
+	fw1, err := w.Create("file1.txt")
+	require.NoError(t, err)
+	msg1 := []byte("Solid block file 1")
+	fw1.Write(msg1)
+
+	fw2, err := w.Create("file2.txt")
+	require.NoError(t, err)
+	msg2 := []byte("Solid block file 2")
+	fw2.Write(msg2)
+
+	err = w.Close()
+	require.NoError(t, err)
+	f.Close()
+
+	r, err := OpenReader(f.Name())
+	require.NoError(t, err)
+	defer r.Close()
+
+	assert.Equal(t, 2, len(r.File))
+
+	// In solid mode, both files should be in stream 0
+	assert.Equal(t, 0, r.File[0].Stream)
+	assert.Equal(t, 0, r.File[1].Stream)
+
+	rc1, _ := r.File[0].Open()
+	out1, _ := io.ReadAll(rc1)
+	assert.Equal(t, msg1, out1)
+	rc1.Close()
+
+	rc2, _ := r.File[1].Open()
+	out2, _ := io.ReadAll(rc2)
+	assert.Equal(t, msg2, out2)
+	rc2.Close()
+}
