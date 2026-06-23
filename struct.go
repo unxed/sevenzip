@@ -412,8 +412,10 @@ func (h *FileHeader) Mode() (mode iofs.FileMode) {
 	} else {
 		mode = msdosModeToFileMode(h.Attributes)
 	}
-
-	return
+	if len(h.Name) > 0 && h.Name[len(h.Name)-1] == '/' {
+		mode |= iofs.ModeDir
+	}
+	return mode
 }
 
 func msdosModeToFileMode(m uint32) (mode iofs.FileMode) {
