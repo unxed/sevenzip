@@ -38,6 +38,11 @@ var once = sync.OnceValues(func() (*lru.Cache[cacheKey, []byte], error) {
 	return lru.New[cacheKey, []byte](cacheSize)
 })
 
+// CalculateKey derives a 32-byte AES key from password, cycles, and salt.
+func CalculateKey(password string, cycles int, salt []byte) ([]byte, error) {
+	return calculateKey(password, cycles, salt)
+}
+
 func calculateKey(password string, cycles int, salt []byte) ([]byte, error) {
 	cache, err := once()
 	if err != nil {

@@ -132,3 +132,40 @@ func TestWriterSolid(t *testing.T) {
 	assert.Equal(t, msg2, out2)
 	rc2.Close()
 }
+
+func TestWriterEncrypted(t *testing.T) {
+	t.Parallel()
+
+	f, err := os.CreateTemp("", "sevenzip-enc-*.7z")
+	require.NoError(t, err)
+	defer os.Remove(f.Name())
+
+	w, err := NewWriter(f, WithPassword("mysecret"))
+	require.NoError(t, err)
+
+	fw, err := w.Create("secret.txt")
+	require.NoError(t, err)
+
+	msg := []byte("Highly confidential encrypted data")
+	_, err = fw.Write(msg)
+	require.NoError(t, err)
+
+	err = w.Close()
+	require.NoError(t, err)
+	f.Close()
+
+	// Read it back
+	r, err := OpenReaderWithPassword(f.Name(), "mysecret")
+	require.NoError(t, err)
+	defer r.Close()
+
+	assert.Equal(t, 1, len(r.File))
+	assert.Equal(t, "secret.txt", r.File[0].Name)
+
+	rc, err := r.File[0].Open()
+	require.NoError(t, err)
+	out, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	assert.Equal(t, msg, out)
+	rc.Close()
+}

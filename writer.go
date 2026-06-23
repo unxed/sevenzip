@@ -2,14 +2,55 @@ package sevenzip
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"hash"
 	"hash/crc32"
 	"io"
 
+	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/unxed/xz/lzma"
 )
+
+// aesWriter implements a byte-stream encryptor for AES-CBC-256.
+// It buffers incoming bytes and encrypts them in 16-byte blocks.
+type aesWriter struct {
+	w     io.Writer
+	cbc   cipher.BlockMode
+	buf   bytes.Buffer
+	count uint64
+}
+
+func (aw *aesWriter) Write(p []byte) (int, error) {
+	aw.buf.Write(p)
+	for aw.buf.Len() >= 16 {
+		var block [16]byte
+		_, _ = aw.buf.Read(block[:])
+		aw.cbc.CryptBlocks(block[:], block[:])
+		if _, err := aw.w.Write(block[:]); err != nil {
+			return 0, err
+		}
+		aw.count += 16
+	}
+	return len(p), nil
+}
+
+func (aw *aesWriter) Close() error {
+	if aw.buf.Len() > 0 {
+		pad := 16 - aw.buf.Len()
+		aw.buf.Write(make([]byte, pad))
+		block := aw.buf.Bytes()
+		aw.cbc.CryptBlocks(block, block)
+		if _, err := aw.w.Write(block); err != nil {
+			return err
+		}
+		aw.count += 16
+	}
+	return nil
+}
 
 // WriterOption is a functional option for configuring a Writer.
 type WriterOption func(*Writer)
@@ -23,6 +64,13 @@ func WithSolid(solid bool) WriterOption {
 	}
 }
 
+// WithPassword configures the archive to be encrypted with the provided password.
+func WithPassword(password string) WriterOption {
+	return func(w *Writer) {
+		w.password = password
+	}
+}
+
 // Writer provides an API for creating 7-zip archives.
 type Writer struct {
 	w          io.WriteSeeker
@@ -31,14 +79,31 @@ type Writer struct {
 	current    *fileWriter
 	activeFold *folderWriter
 	solid      bool
+	password   string
 	closed     bool
 }
 
 type folderWriter struct {
-	compressor io.WriteCloser
-	compCount  *countWriter
-	propByte   byte
-	files      []*fileInfo
+	compressor  io.WriteCloser
+	aesW        *aesWriter
+	compCount   *countWriter // Physical compressed/encrypted bytes on disk
+	unencComp   *countWriter // Unencrypted compressed bytes
+	propByte    byte
+	aesProps    []byte
+	isEncrypted bool
+	files       []*fileInfo
+}
+
+func (f *folderWriter) Close() error {
+	if err := f.compressor.Close(); err != nil {
+		return err
+	}
+	if f.isEncrypted && f.aesW != nil {
+		if err := f.aesW.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type fileInfo struct {
@@ -75,8 +140,10 @@ func (fw *fileWriter) Write(p []byte) (int, error) {
 		return 0, errors.New("sevenzip: file writer already closed")
 	}
 	n, err := fw.lzmaW.Write(p)
-	_, _ = fw.crc32Hash.Write(p[:n])
-	fw.uncompSize += uint64(n)
+	if n > 0 {
+		_, _ = fw.crc32Hash.Write(p[:n])
+		fw.uncompSize += uint64(n)
+	}
 	return n, err
 }
 
@@ -89,7 +156,7 @@ func (fw *fileWriter) Close() error {
 	// If we are NOT in solid mode, this file has its own exclusive compressor stream
 	// that must be closed right now so its LZMA2 EOS marker and buffers are flushed.
 	if !fw.w.solid && fw.w.activeFold != nil {
-		if err := fw.w.activeFold.compressor.Close(); err != nil {
+		if err := fw.w.activeFold.Close(); err != nil {
 			return err
 		}
 		fw.w.activeFold = nil
@@ -131,6 +198,14 @@ func (w *Writer) Create(name string) (io.WriteCloser, error) {
 // CreateHeader adds a file to the archive using the provided FileHeader.
 // It returns a Writer to which the file contents should be written.
 // If another file is currently being written, it will be implicitly closed.
+func generateRandomBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
 func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 	if w.closed {
 		return nil, errors.New("sevenzip: writer closed")
@@ -150,22 +225,73 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 	if w.activeFold == nil || !w.solid {
 		if w.activeFold != nil {
-			// In non-solid mode, activeFold is closed in fileWriter.Close,
-			// but if for some reason it wasn't, close it here.
-			if err := w.activeFold.compressor.Close(); err != nil {
+			if err := w.activeFold.Close(); err != nil {
 				return nil, err
 			}
 		}
 		cw := &countWriter{w: w.w}
-		lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
-		lzmaW, err := lzmaCfg.NewWriter2(cw)
-		if err != nil {
-			return nil, err
+
+		var aesW *aesWriter
+		var lzmaW io.WriteCloser
+		var aesProps []byte
+		var unencComp *countWriter
+		var err error
+
+		if w.password != "" {
+			salt, err := generateRandomBytes(8)
+			if err != nil {
+				return nil, err
+			}
+			iv, err := generateRandomBytes(16)
+			if err != nil {
+				return nil, err
+			}
+
+			key, err := aes7z.CalculateKey(w.password, 19, salt)
+			if err != nil {
+				return nil, err
+			}
+
+			block, err := aes.NewCipher(key)
+			if err != nil {
+				return nil, err
+			}
+
+			cbc := cipher.NewCBCEncrypter(block, iv)
+			aesW = &aesWriter{w: cw, cbc: cbc}
+
+			// AES coder properties:
+			// Byte 0: salt defined (0x80) | iv defined (0x40) | cycles power 19 (0x13) = 0xd3
+			// Byte 1: (salt size-1 << 4) | (iv size-1) = (7 << 4) | 15 = 0x7f
+			aesProps = make([]byte, 26)
+			aesProps[0] = 0xd3
+			aesProps[1] = 0x7f
+			copy(aesProps[2:10], salt)
+			copy(aesProps[10:26], iv)
+
+			unencComp = &countWriter{w: aesW}
+
+			lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
+			lzmaW, err = lzmaCfg.NewWriter2(unencComp)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
+			lzmaW, err = lzmaCfg.NewWriter2(cw)
+			if err != nil {
+				return nil, err
+			}
 		}
+
 		w.activeFold = &folderWriter{
-			compressor: lzmaW,
-			compCount:  cw,
-			propByte:   fi.propByte,
+			compressor:  lzmaW,
+			aesW:        aesW,
+			compCount:   cw,
+			unencComp:   unencComp,
+			propByte:    fi.propByte,
+			aesProps:    aesProps,
+			isEncrypted: w.password != "",
 		}
 		w.folders = append(w.folders, w.activeFold)
 	}
@@ -194,7 +320,7 @@ func (w *Writer) Close() error {
 		}
 	}
 	if w.activeFold != nil {
-		if err := w.activeFold.compressor.Close(); err != nil {
+		if err := w.activeFold.Close(); err != nil {
 			return err
 		}
 		w.activeFold = nil
@@ -215,23 +341,50 @@ func (w *Writer) Close() error {
 
 		uInfo.folder = make([]*folder, len(w.folders))
 		for i, fold := range w.folders {
-			c := &coder{
-				id:         []byte{0x21}, // LZMA2
-				in:         1,
-				out:        1,
-				properties: []byte{fold.propByte},
-			}
+			var c []*coder
+			var bindPairs []*bindPair
+			var sizes []uint64
+
 			var totalUncomp uint64
 			for _, fi := range fold.files {
 				totalUncomp += fi.uncompSize
 			}
+
+			if fold.isEncrypted {
+				c_aes := &coder{
+					id:         []byte{0x06, 0xf1, 0x07, 0x01}, // AES
+					in:         1,
+					out:        1,
+					properties: fold.aesProps,
+				}
+				c_lzma2 := &coder{
+					id:         []byte{0x21}, // LZMA2
+					in:         1,
+					out:        1,
+					properties: []byte{fold.propByte},
+				}
+				c = []*coder{c_aes, c_lzma2}
+				bindPairs = []*bindPair{{in: 1, out: 0}}
+				sizes = []uint64{fold.unencComp.n, totalUncomp}
+			} else {
+				c_lzma2 := &coder{
+					id:         []byte{0x21}, // LZMA2
+					in:         1,
+					out:        1,
+					properties: []byte{fold.propByte},
+				}
+				c = []*coder{c_lzma2}
+				sizes = []uint64{totalUncomp}
+			}
+
 			uInfo.folder[i] = &folder{
-				in:            1,
-				out:           1,
+				in:            uint64(len(c)),
+				out:           uint64(len(c)),
 				packedStreams: 1,
-				coder:         []*coder{c},
-				packed:        []uint64{0}, // 1 input stream, 0th index
-				size:          []uint64{totalUncomp},
+				coder:         c,
+				bindPair:      bindPairs,
+				packed:        []uint64{0}, // packed stream is Coder 0 input (AES)
+				size:          sizes,
 			}
 		}
 
@@ -278,21 +431,124 @@ func (w *Writer) Close() error {
 		return err
 	}
 
+	var startHdr startHeader
+	var finalHeaderCRC uint32
+
 	headerOffset, err := w.w.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
 
-	if _, err := w.w.Write(headerBuf.Bytes()); err != nil {
-		return err
-	}
+	if w.password != "" {
+		// Encrypt the header (Encoded Header with AES encryption)
+		salt, err := generateRandomBytes(8)
+		if err != nil {
+			return err
+		}
+		iv, err := generateRandomBytes(16)
+		if err != nil {
+			return err
+		}
 
-	headerCRC := crc32.ChecksumIEEE(headerBuf.Bytes())
+		key, err := aes7z.CalculateKey(w.password, 19, salt)
+		if err != nil {
+			return err
+		}
 
-	startHdr := startHeader{
-		Offset: uint64(headerOffset - 32),
-		Size:   uint64(headerBuf.Len()),
-		CRC:    headerCRC,
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			return err
+		}
+
+		cbc := cipher.NewCBCEncrypter(block, iv)
+		var encBuf bytes.Buffer
+		aesW := &aesWriter{w: &encBuf, cbc: cbc}
+		if _, err := aesW.Write(headerBuf.Bytes()); err != nil {
+			return err
+		}
+		if err := aesW.Close(); err != nil {
+			return err
+		}
+
+		// Write encrypted header payload to the archive
+		if _, err := w.w.Write(encBuf.Bytes()); err != nil {
+			return err
+		}
+
+		headerPackSize := uint64(encBuf.Len())
+
+		// Generate streamsInfo (metadata) for the Encoded Header
+		pInfo := packInfo{
+			position: uint64(headerOffset - 32),
+			streams:  1,
+			size:     []uint64{headerPackSize},
+		}
+
+		aesProps := make([]byte, 26)
+		aesProps[0] = 0xd3
+		aesProps[1] = 0x7f
+		copy(aesProps[2:10], salt)
+		copy(aesProps[10:26], iv)
+
+		c_aes := &coder{
+			id:         []byte{0x06, 0xf1, 0x07, 0x01}, // AES
+			in:         1,
+			out:        1,
+			properties: aesProps,
+		}
+
+		uInfo := unpackInfo{
+			folder: []*folder{
+				{
+					in:            1,
+					out:           1,
+					packedStreams: 1,
+					coder:         []*coder{c_aes},
+					packed:        []uint64{0},
+					size:          []uint64{uint64(headerBuf.Len())},
+				},
+			},
+			digest: []uint32{crc32.ChecksumIEEE(headerBuf.Bytes())},
+		}
+
+		hEnc := &streamsInfo{
+			packInfo:   &pInfo,
+			unpackInfo: &uInfo,
+		}
+
+		metadataOffset, err := w.w.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+
+		// Encoded Header starts with idEncodedHeader (0x17)
+		var metadataBuf bytes.Buffer
+		metadataBuf.WriteByte(0x17)
+		if err := writeStreamsInfo(&metadataBuf, hEnc); err != nil {
+			return err
+		}
+
+		if _, err := w.w.Write(metadataBuf.Bytes()); err != nil {
+			return err
+		}
+
+		finalHeaderCRC = crc32.ChecksumIEEE(metadataBuf.Bytes())
+		startHdr = startHeader{
+			Offset: uint64(metadataOffset - 32),
+			Size:   uint64(metadataBuf.Len()),
+			CRC:    finalHeaderCRC,
+		}
+	} else {
+		// Non-encrypted, standard header flow
+		if _, err := w.w.Write(headerBuf.Bytes()); err != nil {
+			return err
+		}
+		finalHeaderCRC = crc32.ChecksumIEEE(headerBuf.Bytes())
+		startHdr = startHeader{
+			Offset: uint64(headerOffset - 32),
+			Size:   uint64(headerBuf.Len()),
+			CRC:    finalHeaderCRC,
+		}
 	}
 
 	var startBuf bytes.Buffer
