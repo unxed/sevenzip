@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/bodgit/plumbing"
-	"github.com/bodgit/sevenzip/internal/pool"
-	"github.com/bodgit/sevenzip/internal/util"
+	"github.com/unxed/sevenzip/internal/pool"
+	"github.com/unxed/sevenzip/internal/util"
 	"github.com/spf13/afero"
 	"go4.org/readerutil"
 )

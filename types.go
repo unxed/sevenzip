@@ -11,7 +11,7 @@ import (
 	"math/bits"
 	"time"
 
-	"github.com/bodgit/sevenzip/internal/util"
+	"github.com/unxed/sevenzip/internal/util"
 	"github.com/bodgit/windows"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"

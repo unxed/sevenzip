@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/bodgit/plumbing"
-	"github.com/bodgit/sevenzip/internal/util"
+	"github.com/unxed/sevenzip/internal/util"
 )
 
 var (

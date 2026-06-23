@@ -5,7 +5,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/bodgit/sevenzip/internal/aes7z"
+	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
