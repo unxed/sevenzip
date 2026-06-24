@@ -1,7 +1,10 @@
 // Package util implements various utility types and interfaces.
 package util
 
-import "io"
+import (
+	"bufio"
+	"io"
+)
 
 // SizeReadSeekCloser is an io.Reader, io.Seeker, and io.Closer with a Size
 // method.
@@ -65,4 +68,31 @@ func ByteReadCloser(r io.ReadCloser) ReadCloser {
 	}
 
 	return &byteReadCloser{r}
+}
+// BufioReadSeekCloser wraps a SectionReader to provide buffered sequential
+// reading while preserving the ReaderAt and Seeker interfaces for parallel processing.
+type BufioReadSeekCloser struct {
+	*bufio.Reader
+	sr *io.SectionReader
+}
+
+func NewBufioReadSeekCloser(sr *io.SectionReader) *BufioReadSeekCloser {
+	return &BufioReadSeekCloser{
+		Reader: bufio.NewReader(sr),
+		sr:     sr,
+	}
+}
+
+func (b *BufioReadSeekCloser) ReadAt(p []byte, off int64) (int, error) {
+	return b.sr.ReadAt(p, off)
+}
+
+func (b *BufioReadSeekCloser) Seek(offset int64, whence int) (int64, error) {
+	n, err := b.sr.Seek(offset, whence)
+	b.Reader.Reset(b.sr)
+	return n, err
+}
+
+func (b *BufioReadSeekCloser) Close() error {
+	return nil
 }

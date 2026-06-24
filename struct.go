@@ -1,7 +1,6 @@
 package sevenzip
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"hash"
@@ -272,7 +271,8 @@ func (si *streamsInfo) folderReader(r io.ReaderAt, folder int, password string) 
 
 	for i, input := range f.packed {
 		size := int64(si.packInfo.size[packedOffset+i]) //nolint:gosec
-		in[input] = util.NopCloser(bufio.NewReader(io.NewSectionReader(r, si.folderOffset(folder)+offset, size)))
+		sr := io.NewSectionReader(r, si.folderOffset(folder)+offset, size)
+		in[input] = util.NewBufioReadSeekCloser(sr)
 		offset += size
 	}
 
