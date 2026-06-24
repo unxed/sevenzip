@@ -52,10 +52,20 @@ func (aw *aesWriter) Close() error {
 	}
 	return nil
 }
-var lzmaWriterPool sync.Pool
+var (
+	lzmaWriterPool    sync.Pool // Для параллельных упаковщиков
+	lzmaSeqWriterPool sync.Pool // Для строго однопоточных упаковщиков
+)
 
 func getLZMAWriter(w io.Writer, dictCap int, concurrency int) (*lzma.Writer2, error) {
-	if v := lzmaWriterPool.Get(); v != nil {
+	var pool *sync.Pool
+	if concurrency == 1 {
+		pool = &lzmaSeqWriterPool
+	} else {
+		pool = &lzmaWriterPool
+	}
+
+	if v := pool.Get(); v != nil {
 		zw := v.(*lzma.Writer2)
 		zw.Reset(w)
 		return zw, nil
@@ -67,8 +77,12 @@ func getLZMAWriter(w io.Writer, dictCap int, concurrency int) (*lzma.Writer2, er
 	return lzmaCfg.NewWriter2(w)
 }
 
-func putLZMAWriter(zw *lzma.Writer2) {
-	lzmaWriterPool.Put(zw)
+func putLZMAWriter(zw *lzma.Writer2, concurrency int) {
+	if concurrency == 1 {
+		lzmaSeqWriterPool.Put(zw)
+	} else {
+		lzmaWriterPool.Put(zw)
+	}
 }
 
 // Новые инстанции пулеров для разного уровня параллельности будут бесшовно
@@ -107,6 +121,7 @@ type Writer struct {
 
 type folderWriter struct {
 	compressor  io.WriteCloser
+	concurrency int          // Запоминаем уровень параллельности для корректного возврата в пул
 	aesW        *aesWriter
 	compCount   *countWriter // Physical compressed/encrypted bytes on disk
 	unencComp   *countWriter // Unencrypted compressed bytes
@@ -121,7 +136,8 @@ func (f *folderWriter) Close() error {
 		return err
 	}
 	if zw, ok := f.compressor.(*lzma.Writer2); ok {
-		putLZMAWriter(zw)
+		// Возвращаем в правильный пул на основе сохраненного значения concurrency
+		putLZMAWriter(zw, f.concurrency)
 	}
 	if f.isEncrypted && f.aesW != nil {
 		if err := f.aesW.Close(); err != nil {
@@ -338,6 +354,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 		w.activeFold = &folderWriter{
 			compressor:  lzmaW,
+			concurrency: concurrency,
 			aesW:        aesW,
 			compCount:   cw,
 			unencComp:   unencComp,
@@ -348,6 +365,8 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		w.folders = append(w.folders, w.activeFold)
 	}
 
+    // Переопределяем putLZMAWriter, чтобы он учитывал внутренний статус
+
 	w.activeFold.files = append(w.activeFold.files, fi)
 
 	w.current = &fileWriter{
@@ -357,6 +376,10 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		crc32Hash: crc32.NewIEEE(),
 	}
 	return w.current, nil
+}
+
+func putLZMAWriterInternal(zw *lzma.Writer2, solid bool) {
+	lzmaWriterPool.Put(zw)
 }
 
 // Close finishes writing the 7-zip archive.
