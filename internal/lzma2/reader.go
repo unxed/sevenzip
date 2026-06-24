@@ -95,7 +95,7 @@ func NewReader(p []byte, _ uint64, readers []io.ReadCloser) (io.ReadCloser, erro
 		return nil, fmt.Errorf("lzma2: error verifying config: %w", err)
 	}
 
-	// Try parallel decompression if the input is seekable
+	// Try parallel decompression if the input is seekable and has multiple blocks
 	if sra, ok := readers[0].(seekReaderAt); ok {
 		currentOffset, err := sra.Seek(0, io.SeekCurrent)
 		if err == nil {
@@ -107,13 +107,16 @@ func NewReader(p []byte, _ uint64, readers []io.ReadCloser) (io.ReadCloser, erro
 					rAt = io.NewSectionReader(sra, currentOffset, size-currentOffset)
 					streamSize = size - currentOffset
 				}
-				// Use the parallel reader from github.com/unxed/xz
-				pconfig := xz.ReaderConfig{DictCap: config.DictCap}
-				if pr, err := pconfig.NewParallelReader(rAt, streamSize); err == nil {
-					return &readCloser{
-						c: readers[0],
-						r: pr,
-					}, nil
+				// Избегаем накладных расходов параллельного декодера, если в потоке всего 1 блок
+				blocks, errBlocks := xz.ParseBlocks(rAt, streamSize)
+				if errBlocks == nil && len(blocks) > 1 {
+					pconfig := xz.ReaderConfig{DictCap: config.DictCap}
+					if pr, err := pconfig.NewParallelReader(rAt, streamSize); err == nil {
+						return &readCloser{
+							c: readers[0],
+							r: pr,
+						}, nil
+					}
 				}
 			}
 		}
