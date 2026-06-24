@@ -287,7 +287,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 		// Интеллектуальный выбор параллельности: для мелких файлов в Non-Solid зажимаем в 1 поток
 		concurrency := 1
-		if w.solid || fh.UncompressedSize > 1024*1024 { // > 1 MB
+		if w.solid || fh.UncompressedSize > 512*1024 { // > 512 KB
 			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS) внутри lzma.Writer2Config
 		}
 
