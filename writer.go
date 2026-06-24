@@ -54,19 +54,25 @@ func (aw *aesWriter) Close() error {
 }
 var lzmaWriterPool sync.Pool
 
-func getLZMAWriter(w io.Writer, dictCap int) (*lzma.Writer2, error) {
+func getLZMAWriter(w io.Writer, dictCap int, concurrency int) (*lzma.Writer2, error) {
 	if v := lzmaWriterPool.Get(); v != nil {
 		zw := v.(*lzma.Writer2)
 		zw.Reset(w)
 		return zw, nil
 	}
-	lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
+	lzmaCfg := lzma.Writer2Config{
+		DictCap:     dictCap,
+		Concurrency: concurrency,
+	}
 	return lzmaCfg.NewWriter2(w)
 }
 
 func putLZMAWriter(zw *lzma.Writer2) {
 	lzmaWriterPool.Put(zw)
 }
+
+// Новые инстанции пулеров для разного уровня параллельности будут бесшовно
+// утилизироваться благодаря внутренней логике lzma.Writer2.Reset
 
 // WriterOption is a functional option for configuring a Writer.
 type WriterOption func(*Writer)
@@ -279,6 +285,11 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
+		concurrency := 1
+		if w.solid {
+			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS) внутри lzma.Writer2Config
+		}
+
 		if w.password != "" {
 			salt, err := generateRandomBytes(8)
 			if err != nil {
@@ -313,12 +324,12 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 			unencComp = &countWriter{w: aesW}
 
-			lzmaW, err = getLZMAWriter(unencComp, dictCap)
+			lzmaW, err = getLZMAWriter(unencComp, dictCap, concurrency)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			lzmaW, err = getLZMAWriter(cw, dictCap)
+			lzmaW, err = getLZMAWriter(cw, dictCap, concurrency)
 			if err != nil {
 				return nil, err
 			}
