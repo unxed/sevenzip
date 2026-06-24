@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"io"
 	"sync"
+	"runtime"
 
 	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/unxed/xz/lzma"
@@ -270,7 +271,27 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 	fh.isEmptyStream = isDir
 	fh.isEmptyFile = false
 
-	dictCap := 8 * 1024 * 1024 // 8 MiB dictionary
+	dictCap := 8 * 1024 * 1024 // 8 MiB dictionary по умолчанию
+
+	// Вычисляем оптимальный размер словаря (блока) для параллельного сжатия
+	if !w.solid && fh.UncompressedSize > 0 {
+		numCPU := runtime.NumCPU()
+		if numCPU < 1 {
+			numCPU = 1
+		}
+		// Целевой размер блока, чтобы занять все ядра
+		targetBlock := int64(fh.UncompressedSize) / int64(numCPU)
+		if targetBlock < 64*1024 {
+			targetBlock = 64 * 1024 // 64 KB — минимальный размер словаря LZMA2
+		}
+		if targetBlock < int64(dictCap) {
+			// Кодируем и декодируем через LZMA2-спецификацию, чтобы получить валидный размер
+			code := lzma.EncodeDictCap(targetBlock)
+			dictCapDec, _ := lzma.DecodeDictCap(code)
+			dictCap = int(dictCapDec)
+		}
+	}
+
 	fi := &fileInfo{
 		fh:       *fh,
 		propByte: lzma.EncodeDictCap(int64(dictCap)),
@@ -301,10 +322,10 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
-		// Интеллектуальный выбор параллельности на основе размера словаря (размера блока)
+		// Интеллектуальный выбор параллельности: мелкие файлы жмем в 1 поток
 		concurrency := 1
-		if w.solid || fh.UncompressedSize > uint64(dictCap) {
-			concurrency = 0 // Использовать параллельное сжатие, только если файл больше одного блока (словаря)
+		if w.solid || (fh.UncompressedSize > 512*1024 && fh.UncompressedSize > uint64(dictCap)) {
+			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS)
 		}
 
 		if w.password != "" {
