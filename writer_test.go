@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 	"time"
+    "path/filepath"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,7 +169,9 @@ func TestWriterEncrypted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, msg, out)
 	rc.Close()
-}func TestLZMA2PoolingPerformance(t *testing.T) {
+}
+
+func TestLZMA2PoolingPerformance(t *testing.T) {
 	// Этот тест проверяет, что при создании множества маленьких файлов
 	// (каждый в своем folder) память не утекает и компрессоры переиспользуются.
 	if testing.Short() {
