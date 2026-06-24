@@ -168,4 +168,33 @@ func TestWriterEncrypted(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, msg, out)
 	rc.Close()
+}func TestLZMA2PoolingPerformance(t *testing.T) {
+	// Этот тест проверяет, что при создании множества маленьких файлов
+	// (каждый в своем folder) память не утекает и компрессоры переиспользуются.
+	if testing.Short() {
+		t.Skip("skipping memory stress test in short mode")
+	}
+
+	f, err := os.CreateTemp("", "sevenzip-pool-test-*.7z")
+	require.NoError(t, err)
+	defer os.Remove(f.Name())
+
+	w, err := NewWriter(f, WithSolid(false)) // Отключаем solid, чтобы форсировать создание folder на каждый файл
+	require.NoError(t, err)
+
+	data := []byte("constant data for testing pooling efficiency")
+
+	// Создаем 1000 файлов. Без пулинга это вызвало бы ~48 ГБ аллокаций.
+	for i := 0; i < 1000; i++ {
+		fw, err := w.Create(filepath.Join("dir", filepath.Base(f.Name())+string(rune(i))))
+		if err != nil {
+			t.Fatalf("failed to create file %d: %v", i, err)
+		}
+		fw.Write(data)
+		fw.Close()
+	}
+
+	err = w.Close()
+	require.NoError(t, err)
+	f.Close()
 }

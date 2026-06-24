@@ -10,6 +10,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"sync"
 
 	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/unxed/xz/lzma"
@@ -50,6 +51,21 @@ func (aw *aesWriter) Close() error {
 		aw.count += 16
 	}
 	return nil
+}
+var lzmaWriterPool sync.Pool
+
+func getLZMAWriter(w io.Writer, dictCap int) (*lzma.Writer2, error) {
+	if v := lzmaWriterPool.Get(); v != nil {
+		zw := v.(*lzma.Writer2)
+		zw.Reset(w)
+		return zw, nil
+	}
+	lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
+	return lzmaCfg.NewWriter2(w)
+}
+
+func putLZMAWriter(zw *lzma.Writer2) {
+	lzmaWriterPool.Put(zw)
 }
 
 // WriterOption is a functional option for configuring a Writer.
@@ -97,6 +113,9 @@ type folderWriter struct {
 func (f *folderWriter) Close() error {
 	if err := f.compressor.Close(); err != nil {
 		return err
+	}
+	if zw, ok := f.compressor.(*lzma.Writer2); ok {
+		putLZMAWriter(zw)
 	}
 	if f.isEncrypted && f.aesW != nil {
 		if err := f.aesW.Close(); err != nil {
@@ -294,14 +313,12 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 			unencComp = &countWriter{w: aesW}
 
-			lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
-			lzmaW, err = lzmaCfg.NewWriter2(unencComp)
+			lzmaW, err = getLZMAWriter(unencComp, dictCap)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			lzmaCfg := lzma.Writer2Config{DictCap: dictCap}
-			lzmaW, err = lzmaCfg.NewWriter2(cw)
+			lzmaW, err = getLZMAWriter(cw, dictCap)
 			if err != nil {
 				return nil, err
 			}
