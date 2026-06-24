@@ -66,7 +66,7 @@ func NewReader(_ []byte, _ uint64, readers []io.ReadCloser) (io.ReadCloser, erro
 			return nil, fmt.Errorf("zstd: error resetting: %w", err)
 		}
 	} else {
-		if r, err = zstd.NewReader(readers[0], zstd.WithDecoderMaxWindow(128<<20)); err != nil {
+		if r, err = zstd.NewReader(readers[0], zstd.WithDecoderMaxWindow(512<<20), zstd.WithDecoderMaxMemory(512<<20)); err != nil {
 			return nil, fmt.Errorf("zstd: error creating reader: %w", err)
 		}
 
