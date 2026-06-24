@@ -53,18 +53,25 @@ func (aw *aesWriter) Close() error {
 	}
 	return nil
 }
+type poolKey struct {
+	dictCap     int
+	concurrency int
+}
+
 var (
-	lzmaWriterPool    sync.Pool // Для параллельных упаковщиков
-	lzmaSeqWriterPool sync.Pool // Для строго однопоточных упаковщиков
+	lzmaPools   = make(map[poolKey]*sync.Pool)
+	lzmaPoolsMu sync.Mutex
 )
 
 func getLZMAWriter(w io.Writer, dictCap int, concurrency int) (*lzma.Writer2, error) {
-	var pool *sync.Pool
-	if concurrency == 1 {
-		pool = &lzmaSeqWriterPool
-	} else {
-		pool = &lzmaWriterPool
+	key := poolKey{dictCap, concurrency}
+	lzmaPoolsMu.Lock()
+	pool, ok := lzmaPools[key]
+	if !ok {
+		pool = &sync.Pool{}
+		lzmaPools[key] = pool
 	}
+	lzmaPoolsMu.Unlock()
 
 	if v := pool.Get(); v != nil {
 		zw := v.(*lzma.Writer2)
@@ -78,12 +85,16 @@ func getLZMAWriter(w io.Writer, dictCap int, concurrency int) (*lzma.Writer2, er
 	return lzmaCfg.NewWriter2(w)
 }
 
-func putLZMAWriter(zw *lzma.Writer2, concurrency int) {
-	if concurrency == 1 {
-		lzmaSeqWriterPool.Put(zw)
-	} else {
-		lzmaWriterPool.Put(zw)
+func putLZMAWriter(zw *lzma.Writer2, dictCap int, concurrency int) {
+	key := poolKey{dictCap, concurrency}
+	lzmaPoolsMu.Lock()
+	pool, ok := lzmaPools[key]
+	if !ok {
+		pool = &sync.Pool{}
+		lzmaPools[key] = pool
 	}
+	lzmaPoolsMu.Unlock()
+	pool.Put(zw)
 }
 
 // Новые инстанции пулеров для разного уровня параллельности будут бесшовно
@@ -122,7 +133,8 @@ type Writer struct {
 
 type folderWriter struct {
 	compressor  io.WriteCloser
-	concurrency int          // Запоминаем уровень параллельности для корректного возврата в пул
+	dictCap     int          // Запоминаем размер словаря для корректного пула
+	concurrency int          // Запоминаем уровень параллельности для корректного пула
 	aesW        *aesWriter
 	compCount   *countWriter // Physical compressed/encrypted bytes on disk
 	unencComp   *countWriter // Unencrypted compressed bytes
@@ -137,8 +149,8 @@ func (f *folderWriter) Close() error {
 		return err
 	}
 	if zw, ok := f.compressor.(*lzma.Writer2); ok {
-		// Возвращаем в правильный пул на основе сохраненного значения concurrency
-		putLZMAWriter(zw, f.concurrency)
+		// Передаем точные параметры в метод возврата
+		putLZMAWriter(zw, f.dictCap, f.concurrency)
 	}
 	if f.isEncrypted && f.aesW != nil {
 		if err := f.aesW.Close(); err != nil {
@@ -281,8 +293,8 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		}
 		// Целевой размер блока, чтобы занять все ядра
 		targetBlock := int64(fh.UncompressedSize) / int64(numCPU)
-		if targetBlock < 64*1024 {
-			targetBlock = 64 * 1024 // 64 KB — минимальный размер словаря LZMA2
+		if targetBlock < 1024*1024 {
+			targetBlock = 1024 * 1024 // 1 MB — минимальный размер словаря (блока) для параллельного LZMA2
 		}
 		if targetBlock < int64(dictCap) {
 			// Кодируем и декодируем через LZMA2-спецификацию, чтобы получить валидный размер
@@ -322,9 +334,9 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
-		// Интеллектуальный выбор параллельности: мелкие файлы жмем в 1 поток
+		// Интеллектуальный выбор параллельности: параллелим только файлы строго крупнее 1 МБ
 		concurrency := 1
-		if w.solid || (fh.UncompressedSize > 512*1024 && fh.UncompressedSize > uint64(dictCap)) {
+		if w.solid || (fh.UncompressedSize > 1024*1024 && fh.UncompressedSize > uint64(dictCap)) {
 			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS)
 		}
 
@@ -375,6 +387,7 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 		w.activeFold = &folderWriter{
 			compressor:  lzmaW,
+			dictCap:     dictCap,
 			concurrency: concurrency,
 			aesW:        aesW,
 			compCount:   cw,
@@ -397,10 +410,6 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		crc32Hash: crc32.NewIEEE(),
 	}
 	return w.current, nil
-}
-
-func putLZMAWriterInternal(zw *lzma.Writer2, solid bool) {
-	lzmaWriterPool.Put(zw)
 }
 
 // Close finishes writing the 7-zip archive.
