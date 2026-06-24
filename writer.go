@@ -301,10 +301,10 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
-		// Интеллектуальный выбор параллельности: для мелких файлов в Non-Solid зажимаем в 1 поток
+		// Интеллектуальный выбор параллельности на основе размера словаря (размера блока)
 		concurrency := 1
-		if w.solid || fh.UncompressedSize > 512*1024 { // > 512 KB
-			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS) внутри lzma.Writer2Config
+		if w.solid || fh.UncompressedSize > uint64(dictCap) {
+			concurrency = 0 // Использовать параллельное сжатие, только если файл больше одного блока (словаря)
 		}
 
 		if w.password != "" {
