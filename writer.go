@@ -118,6 +118,12 @@ func WithPassword(password string) WriterOption {
 		w.password = password
 	}
 }
+// WithConcurrency sets the number of concurrent workers for non-solid compression.
+func WithConcurrency(n int) WriterOption {
+	return func(w *Writer) {
+		w.concurrency = n
+	}
+}
 
 // Writer provides an API for creating 7-zip archives.
 type Writer struct {
@@ -129,27 +135,47 @@ type Writer struct {
 	solid      bool
 	password   string
 	closed     bool
+
+	mu          sync.Mutex
+	concurrency int
+	spools      chan *folderWriter
+	folderMap   map[uint64]*folderWriter
+	writeSeq    uint64
+	coordDone   chan error
 }
 
 type folderWriter struct {
 	compressor  io.WriteCloser
-	dictCap     int          // Запоминаем размер словаря для корректного пула
-	concurrency int          // Запоминаем уровень параллельности для корректного пула
+	dictCap     int
+	concurrency int
 	aesW        *aesWriter
-	compCount   *countWriter // Physical compressed/encrypted bytes on disk
-	unencComp   *countWriter // Unencrypted compressed bytes
+	compCount   *countWriter
+	unencComp   *countWriter
 	propByte    byte
 	aesProps    []byte
 	isEncrypted bool
 	files       []*fileInfo
+
+	seq   uint64
+	spool *spoolWriter
+
+	mu     sync.Mutex
+	closed bool
 }
 
 func (f *folderWriter) Close() error {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil
+	}
+	f.closed = true
+	f.mu.Unlock()
+
 	if err := f.compressor.Close(); err != nil {
 		return err
 	}
 	if zw, ok := f.compressor.(*lzma.Writer2); ok {
-		// Передаем точные параметры в метод возврата
 		putLZMAWriter(zw, f.dictCap, f.concurrency)
 	}
 	if f.isEncrypted && f.aesW != nil {
@@ -187,6 +213,9 @@ type fileWriter struct {
 	crc32Hash  hash.Hash32
 	uncompSize uint64
 	closed     bool
+
+	mu   sync.Mutex
+	fold *folderWriter
 }
 
 func (fw *fileWriter) Write(p []byte) (int, error) {
@@ -202,28 +231,31 @@ func (fw *fileWriter) Write(p []byte) (int, error) {
 }
 
 func (fw *fileWriter) Close() error {
+	fw.mu.Lock()
 	if fw.closed {
+		fw.mu.Unlock()
 		return nil
 	}
 	fw.closed = true
+	fw.mu.Unlock()
 
-	// If we are NOT in solid mode, this file has its own exclusive compressor stream
-	// that must be closed right now so its LZMA2 EOS marker and buffers are flushed.
-	if !fw.w.solid && fw.w.activeFold != nil {
-		if err := fw.w.activeFold.Close(); err != nil {
+	// Close the folder immediately if NOT solid.
+	if !fw.w.solid && fw.fold != nil {
+		if err := fw.fold.Close(); err != nil {
 			return err
 		}
-		fw.w.activeFold = nil
+		// If async spooling is active, hand over to coordinator
+		if fw.w.concurrency > 1 {
+			fw.w.spools <- fw.fold
+		}
 	}
 
 	fw.fi.uncompSize = fw.uncompSize
 	fw.fi.crc32 = fw.crc32Hash.Sum32()
 
-	// Update original header with final sizes and checksums
 	fw.fi.fh.UncompressedSize = fw.fi.uncompSize
 	fw.fi.fh.CRC32 = fw.fi.crc32
 
-	fw.w.current = nil
 	return nil
 }
 
@@ -247,7 +279,37 @@ func NewWriter(w io.WriteSeeker, opts ...WriterOption) (*Writer, error) {
 	for _, opt := range opts {
 		opt(wr)
 	}
+
+	if wr.concurrency > 1 && !wr.solid {
+		wr.spools = make(chan *folderWriter, wr.concurrency*2)
+		wr.folderMap = make(map[uint64]*folderWriter)
+		wr.coordDone = make(chan error)
+		go wr.coordinator()
+	}
+
 	return wr, nil
+}
+
+func (w *Writer) coordinator() {
+	var err error
+	for fold := range w.spools {
+		w.folderMap[fold.seq] = fold
+		for {
+			if f, ok := w.folderMap[w.writeSeq]; ok {
+				if err == nil {
+					if _, copyErr := io.Copy(w.w, f.spool.Reader()); copyErr != nil {
+						err = copyErr
+					}
+				}
+				f.spool.Close()
+				delete(w.folderMap, w.writeSeq)
+				w.writeSeq++
+			} else {
+				break
+			}
+		}
+	}
+	w.coordDone <- err
 }
 
 // Create adds a file to the archive using the provided name.
@@ -269,10 +331,15 @@ func generateRandomBytes(n int) ([]byte, error) {
 }
 
 func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if w.closed {
 		return nil, errors.New("sevenzip: writer closed")
 	}
-	if w.current != nil {
+
+	// Only close current if we are strictly sequential (solid mode or no concurrency)
+	if w.current != nil && (w.solid || w.concurrency <= 1) {
 		if err := w.current.Close(); err != nil {
 			return nil, err
 		}
@@ -321,12 +388,21 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 	}
 
 	if w.activeFold == nil || !w.solid {
-		if w.activeFold != nil {
+		if w.activeFold != nil && (w.solid || w.concurrency <= 1) {
 			if err := w.activeFold.Close(); err != nil {
 				return nil, err
 			}
 		}
+
 		cw := &countWriter{w: w.w}
+		var spool *spoolWriter
+		var sink io.Writer = cw
+
+		if w.concurrency > 1 && !w.solid {
+			spool = newSpoolWriter()
+			sink = spool
+			cw.w = sink
+		}
 
 		var aesW *aesWriter
 		var lzmaW io.WriteCloser
@@ -334,10 +410,11 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
-		// Интеллектуальный выбор параллельности: параллелим только файлы строго крупнее 1 МБ
-		concurrency := 1
+		// В режиме параллельных папок (concurrency > 1) сам LZMA работает в 1 поток на каждый файл,
+		// так как файлов много. Если файл 1 и огромный — отдаем ему все ядра.
+		lzmaConcurrency := 1
 		if w.solid || (fh.UncompressedSize > 1024*1024 && fh.UncompressedSize > uint64(dictCap)) {
-			concurrency = 0 // 0 означает автоопределение (GOMAXPROCS)
+			lzmaConcurrency = 0
 		}
 
 		if w.password != "" {
@@ -374,12 +451,12 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 
 			unencComp = &countWriter{w: aesW}
 
-			lzmaW, err = getLZMAWriter(unencComp, dictCap, concurrency)
+			lzmaW, err = getLZMAWriter(unencComp, dictCap, lzmaConcurrency)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			lzmaW, err = getLZMAWriter(cw, dictCap, concurrency)
+			lzmaW, err = getLZMAWriter(cw, dictCap, lzmaConcurrency)
 			if err != nil {
 				return nil, err
 			}
@@ -388,47 +465,61 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		w.activeFold = &folderWriter{
 			compressor:  lzmaW,
 			dictCap:     dictCap,
-			concurrency: concurrency,
+			concurrency: lzmaConcurrency,
 			aesW:        aesW,
 			compCount:   cw,
 			unencComp:   unencComp,
 			propByte:    fi.propByte,
 			aesProps:    aesProps,
 			isEncrypted: w.password != "",
+			seq:         uint64(len(w.folders)),
+			spool:       spool,
 		}
 		w.folders = append(w.folders, w.activeFold)
 	}
 
-    // Переопределяем putLZMAWriter, чтобы он учитывал внутренний статус
-
 	w.activeFold.files = append(w.activeFold.files, fi)
 
-	w.current = &fileWriter{
+	fw := &fileWriter{
 		w:         w,
 		fi:        fi,
 		lzmaW:     w.activeFold.compressor,
 		crc32Hash: crc32.NewIEEE(),
+		fold:      w.activeFold,
 	}
-	return w.current, nil
+	w.current = fw
+	return fw, nil
 }
 
 // Close finishes writing the 7-zip archive.
 // It writes the directory metadata and updates the signature header.
 func (w *Writer) Close() error {
+	w.mu.Lock()
 	if w.closed {
+		w.mu.Unlock()
 		return nil
 	}
 	w.closed = true
+	w.mu.Unlock()
+
 	if w.current != nil {
 		if err := w.current.Close(); err != nil {
 			return err
 		}
 	}
-	if w.activeFold != nil {
+
+	if w.activeFold != nil && w.solid {
 		if err := w.activeFold.Close(); err != nil {
 			return err
 		}
 		w.activeFold = nil
+	}
+
+	if w.concurrency > 1 && !w.solid {
+		close(w.spools)
+		if err := <-w.coordDone; err != nil {
+			return err
+		}
 	}
 
 	h := &header{}
