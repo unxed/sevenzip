@@ -29,8 +29,8 @@ github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/unxed/xz v0.1.30 h1:n1yDj8+nAhsMSS+c+o89t++cMVuXVua4+rcWlzWchaU=
-github.com/unxed/xz v0.1.30/go.mod h1:+i9oua9YYxBJGNLh9s4itPLtCpCXs8X7M8/SNU4FeZc=
+github.com/unxed/xz v0.1.31 h1:84MkrEP6S/kvU/Kt/XhHERp2L3hhraRe2h96F5V2v/c=
+github.com/unxed/xz v0.1.31/go.mod h1:+i9oua9YYxBJGNLh9s4itPLtCpCXs8X7M8/SNU4FeZc=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
 go4.org v0.0.0-20260112195520-a5071408f32f h1:ziUVAjmTPwQMBmYR1tbdRFJPtTcQUI12fH9QQjfb0Sw=
