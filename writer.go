@@ -145,6 +145,8 @@ type Writer struct {
 }
 
 type folderWriter struct {
+	fileCount   int
+	uncompSize  int64
 	compressor  io.WriteCloser
 	dictCap     int
 	concurrency int
@@ -482,6 +484,8 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 	}
 
 	w.activeFold.files = append(w.activeFold.files, fi)
+	w.activeFold.fileCount++
+	w.activeFold.uncompSize += int64(fh.UncompressedSize)
 
 	fw := &fileWriter{
 		w:         w,

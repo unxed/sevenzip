@@ -1,6 +1,7 @@
 package sevenzip
 
 import (
+    "sync"
 	"bytes"
 	"io"
 	"os"
@@ -14,8 +15,16 @@ type spoolWriter struct {
 	size int64
 }
 
+var spoolBufPool = sync.Pool{
+	New: func() interface{} {
+		return bytes.NewBuffer(make([]byte, 0, 1024*1024))
+	},
+}
+
 func newSpoolWriter() *spoolWriter {
-	return &spoolWriter{buf: &bytes.Buffer{}}
+	buf := spoolBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return &spoolWriter{buf: buf}
 }
 
 func (s *spoolWriter) Write(p []byte) (n int, err error) {
@@ -52,6 +61,9 @@ func (s *spoolWriter) Close() error {
 		os.Remove(s.f.Name())
 		s.f = nil
 	}
-	s.buf = nil
+	if s.buf != nil {
+		spoolBufPool.Put(s.buf)
+		s.buf = nil
+	}
 	return nil
 }
