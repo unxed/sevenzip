@@ -410,10 +410,13 @@ func (w *Writer) CreateHeader(fh *FileHeader) (io.WriteCloser, error) {
 		var unencComp *countWriter
 		var err error
 
-		// В режиме параллельных папок (concurrency > 1) сам LZMA работает в 1 поток на каждый файл,
-		// так как файлов много. Если файл 1 и огромный — отдаем ему все ядра.
+		// Настраиваем параллельность LZMA2:
+		// 1. Для Solid-архива разрешаем параллельность (Concurrency=0), так как это дает
+		//    огромный прирост скорости распаковки за счет создания независимых блоков.
+		// 2. Для отдельных файлов разрешаем её только если файл достаточно велик (>1MB).
+		// 3. Пул getLZMAWriter позаботится о переиспользовании структур.
 		lzmaConcurrency := 1
-		if w.solid || (fh.UncompressedSize > 1024*1024 && fh.UncompressedSize > uint64(dictCap)) {
+		if w.solid || fh.UncompressedSize > 1024*1024 {
 			lzmaConcurrency = 0
 		}
 
