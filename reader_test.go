@@ -16,10 +16,10 @@ import (
 	"testing/iotest"
 	"time"
 
-	"github.com/unxed/sevenzip"
-	"github.com/unxed/sevenzip/internal/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unxed/sevenzip"
+	"github.com/unxed/sevenzip/internal/util"
 	"golang.org/x/sync/errgroup"
 )
 

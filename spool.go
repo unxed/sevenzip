@@ -1,10 +1,10 @@
 package sevenzip
 
 import (
-    "sync"
 	"bytes"
 	"io"
 	"os"
+	"sync"
 )
 
 // spoolWriter buffers compressed data in memory up to a threshold,

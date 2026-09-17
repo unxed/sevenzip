@@ -5,9 +5,9 @@ import (
 	"io"
 	"testing"
 
-	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unxed/sevenzip/internal/aes7z"
 )
 
 // passwordSetter matches the Password method on the AES reader without

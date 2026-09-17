@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/bodgit/plumbing"
+	"github.com/spf13/afero"
 	"github.com/unxed/sevenzip/internal/pool"
 	"github.com/unxed/sevenzip/internal/util"
-	"github.com/spf13/afero"
 	"go4.org/readerutil"
 )
 

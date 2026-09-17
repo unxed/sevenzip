@@ -69,6 +69,7 @@ func ByteReadCloser(r io.ReadCloser) ReadCloser {
 
 	return &byteReadCloser{r}
 }
+
 // BufioReadSeekCloser wraps a SectionReader to provide buffered sequential
 // reading while preserving the ReaderAt and Seeker interfaces for parallel processing.
 type BufioReadSeekCloser struct {

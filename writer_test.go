@@ -3,9 +3,9 @@ package sevenzip
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
-    "path/filepath"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

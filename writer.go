@@ -10,8 +10,8 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
-	"sync"
 	"runtime"
+	"sync"
 
 	"github.com/unxed/sevenzip/internal/aes7z"
 	"github.com/unxed/xz/lzma"
@@ -53,6 +53,7 @@ func (aw *aesWriter) Close() error {
 	}
 	return nil
 }
+
 type poolKey struct {
 	dictCap     int
 	concurrency int
@@ -118,6 +119,7 @@ func WithPassword(password string) WriterOption {
 		w.password = password
 	}
 }
+
 // WithConcurrency sets the number of concurrent workers for non-solid compression.
 func WithConcurrency(n int) WriterOption {
 	return func(w *Writer) {

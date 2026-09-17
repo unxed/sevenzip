@@ -7,8 +7,8 @@ import (
 	"io"
 	"sync"
 
-	"github.com/unxed/sevenzip/internal/util"
 	"github.com/klauspost/compress/flate"
+	"github.com/unxed/sevenzip/internal/util"
 )
 
 type readCloser struct {
