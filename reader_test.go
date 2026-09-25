@@ -493,7 +493,19 @@ func TestBraRead(t *testing.T) {
 			err = errors.Join(err, file.Close())
 		}()
 
-		if _, err = io.ReadAll(file); err != nil {
+		// pr472.7z is encrypted and is opened here without a password, so
+		// its entry cannot be decoded. Upstream only checks that the read
+		// ends. This fork also reports a read that ends before the entry's
+		// declared size as a ReadError wrapping io.ErrUnexpectedEOF (see
+		// TestOpenReaderWithWrongPassword), so the read has to end with that
+		// error rather than with an empty success.
+		_, err = io.ReadAll(file)
+		if err == nil {
+			return errors.New("an encrypted entry read without a password gave no error")
+		}
+
+		var e *sevenzip.ReadError
+		if !errors.As(err, &e) || !e.Encrypted || !errors.Is(err, io.ErrUnexpectedEOF) {
 			return err
 		}
 
