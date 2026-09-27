@@ -101,6 +101,39 @@ func putLZMAWriter(zw *lzma.Writer2, dictCap int, concurrency int) {
 // Новые инстанции пулеров для разного уровня параллельности будут бесшовно
 // утилизироваться благодаря внутренней логике lzma.Writer2.Reset
 
+// compressHeaderLZMA2 compresses a 7-zip Header structure with LZMA2, the
+// same way the original 7-Zip archiver compresses its own archive headers.
+// It picks a dictionary just large enough to hold the whole header (headers
+// are typically tiny compared to file data), and returns the LZMA2 coder
+// property byte alongside the compressed payload.
+func compressHeaderLZMA2(data []byte) (byte, []byte, error) {
+	target := int64(len(data))
+	if target < lzma.MinDictCap {
+		target = lzma.MinDictCap
+	}
+	propByte := lzma.EncodeDictCap(target)
+	dictCap64, err := lzma.DecodeDictCap(propByte)
+	if err != nil {
+		return 0, nil, err
+	}
+	dictCap := int(dictCap64)
+
+	var buf bytes.Buffer
+	zw, err := getLZMAWriter(&buf, dictCap, 1)
+	if err != nil {
+		return 0, nil, err
+	}
+	if _, err := zw.Write(data); err != nil {
+		return 0, nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return 0, nil, err
+	}
+	putLZMAWriter(zw, dictCap, 1)
+
+	return propByte, buf.Bytes(), nil
+}
+
 // WriterOption is a functional option for configuring a Writer.
 type WriterOption func(*Writer)
 
@@ -639,13 +672,32 @@ func (w *Writer) Close() error {
 	var startHdr startHeader
 	var finalHeaderCRC uint32
 
+	// Compress the header itself, exactly as the original 7-Zip archiver
+	// does by default: the plain Header structure built above is always
+	// LZMA2-compressed, and -- if a password was set -- the compressed
+	// bytes are then AES encrypted on top, mirroring the coder chain used
+	// for regular file data (see CreateHeader). The result is written out
+	// as an EncodedHeader (idEncodedHeader / 0x17).
+	headerBytes := headerBuf.Bytes()
+	headerLZMA2PropByte, compHeaderBytes, err := compressHeaderLZMA2(headerBytes)
+	if err != nil {
+		return err
+	}
+
+	c_hdr_lzma2 := &coder{
+		id:         []byte{0x21}, // LZMA2
+		in:         1,
+		out:        1,
+		properties: []byte{headerLZMA2PropByte},
+	}
+
 	headerOffset, err := w.w.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return err
 	}
 
 	if w.password != "" {
-		// Encrypt the header (Encoded Header with AES encryption)
+		// Encrypt the (already compressed) header.
 		salt, err := generateRandomBytes(8)
 		if err != nil {
 			return err
@@ -668,7 +720,7 @@ func (w *Writer) Close() error {
 		cbc := cipher.NewCBCEncrypter(block, iv)
 		var encBuf bytes.Buffer
 		aesW := &aesWriter{w: &encBuf, cbc: cbc}
-		if _, err := aesW.Write(headerBuf.Bytes()); err != nil {
+		if _, err := aesW.Write(compHeaderBytes); err != nil {
 			return err
 		}
 		if err := aesW.Close(); err != nil {
@@ -705,15 +757,16 @@ func (w *Writer) Close() error {
 		uInfo := unpackInfo{
 			folder: []*folder{
 				{
-					in:            1,
-					out:           1,
+					in:            2,
+					out:           2,
 					packedStreams: 1,
-					coder:         []*coder{c_aes},
+					coder:         []*coder{c_aes, c_hdr_lzma2},
+					bindPair:      []*bindPair{{in: 1, out: 0}},
 					packed:        []uint64{0},
-					size:          []uint64{uint64(headerBuf.Len())},
+					size:          []uint64{uint64(len(compHeaderBytes)), uint64(len(headerBytes))},
 				},
 			},
-			digest: []uint32{crc32.ChecksumIEEE(headerBuf.Bytes())},
+			digest: []uint32{crc32.ChecksumIEEE(headerBytes)},
 		}
 
 		hEnc := &streamsInfo{
@@ -744,14 +797,56 @@ func (w *Writer) Close() error {
 			CRC:    finalHeaderCRC,
 		}
 	} else {
-		// Non-encrypted, standard header flow
-		if _, err := w.w.Write(headerBuf.Bytes()); err != nil {
+		// Compressed (but not encrypted) header.
+		if _, err := w.w.Write(compHeaderBytes); err != nil {
 			return err
 		}
-		finalHeaderCRC = crc32.ChecksumIEEE(headerBuf.Bytes())
+
+		pInfo := packInfo{
+			position: uint64(headerOffset - 32),
+			streams:  1,
+			size:     []uint64{uint64(len(compHeaderBytes))},
+		}
+
+		uInfo := unpackInfo{
+			folder: []*folder{
+				{
+					in:            1,
+					out:           1,
+					packedStreams: 1,
+					coder:         []*coder{c_hdr_lzma2},
+					packed:        []uint64{0},
+					size:          []uint64{uint64(len(headerBytes))},
+				},
+			},
+			digest: []uint32{crc32.ChecksumIEEE(headerBytes)},
+		}
+
+		hComp := &streamsInfo{
+			packInfo:   &pInfo,
+			unpackInfo: &uInfo,
+		}
+
+		metadataOffset, err := w.w.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+
+		// Encoded Header starts with idEncodedHeader (0x17)
+		var metadataBuf bytes.Buffer
+		metadataBuf.WriteByte(0x17)
+		if err := writeStreamsInfo(&metadataBuf, hComp); err != nil {
+			return err
+		}
+
+		if _, err := w.w.Write(metadataBuf.Bytes()); err != nil {
+			return err
+		}
+
+		finalHeaderCRC = crc32.ChecksumIEEE(metadataBuf.Bytes())
 		startHdr = startHeader{
-			Offset: uint64(headerOffset - 32),
-			Size:   uint64(headerBuf.Len()),
+			Offset: uint64(metadataOffset - 32),
+			Size:   uint64(metadataBuf.Len()),
 			CRC:    finalHeaderCRC,
 		}
 	}
