@@ -14,6 +14,7 @@ package sevenzip
 // uses for the AES-encrypted-header case (writeStreamsInfo/coder/folder).
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/binary"
 	"hash/crc32"
@@ -25,9 +26,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// buildZstdHeaderArchive takes a plain (unencrypted, uncompressed-header) 7z
-// archive produced by Writer and returns a semantically equivalent archive
-// where the Header is stored as a zstd-compressed Encoded Header.
+// buildZstdHeaderArchive takes an archive produced by Writer (whose Header is
+// now always LZMA2-compressed as an Encoded Header, per the header
+// compression change) and returns a semantically equivalent archive where
+// the Header is instead stored as a zstd-compressed Encoded Header.
 func buildZstdHeaderArchive(t *testing.T, plain []byte) []byte {
 	t.Helper()
 
@@ -39,11 +41,31 @@ func buildZstdHeaderArchive(t *testing.T, plain []byte) []byte {
 	var start startHeader
 	require.NoError(t, binary.Read(bytes.NewReader(plain[12:32]), binary.LittleEndian, &start))
 
-	headerOffset := 32 + int64(start.Offset) //nolint:gosec
+	headerOffset := 32 + int64(start.Offset)      //nolint:gosec
 	headerEnd := headerOffset + int64(start.Size) //nolint:gosec
 	require.LessOrEqual(t, headerEnd, int64(len(plain)))
 
-	rawHeader := plain[headerOffset:headerEnd]
+	headerMeta := plain[headerOffset:headerEnd]
+	metaReader := bufio.NewReader(bytes.NewReader(headerMeta))
+
+	id, err := metaReader.ReadByte()
+	require.NoError(t, err)
+	require.Equal(t, byte(idEncodedHeader), id)
+
+	encodedSI, err := readStreamsInfo(metaReader)
+	require.NoError(t, err)
+	require.Equal(t, 1, encodedSI.Folders())
+
+	// The Writer now always LZMA2-compresses the Header, so decompress it
+	// first to recover the plain, idHeader-prefixed serialized Header bytes,
+	// which is what this test needs in order to repackage it as a
+	// zstd-compressed Encoded Header instead.
+	fr, _, _, err := encodedSI.folderReader(io.NewSectionReader(bytes.NewReader(plain), 32, headerOffset-32), 0, "")
+	require.NoError(t, err)
+
+	rawHeader, err := io.ReadAll(fr)
+	require.NoError(t, err)
+	require.NoError(t, fr.Close())
 	require.Equal(t, byte(idHeader), rawHeader[0])
 
 	zw, err := zstd.NewWriter(nil)
