@@ -80,7 +80,7 @@ func TestWriterHeaderIsCompressed(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	id, si := readRawNextHeader(t, f.Name())
-	require.Equal(t, idEncodedHeader, id, "NextHeader must be an EncodedHeader, not a plain Header")
+	require.Equal(t, byte(idEncodedHeader), id, "NextHeader must be an EncodedHeader, not a plain Header")
 	require.NotNil(t, si)
 	require.NotNil(t, si.packInfo)
 	require.NotNil(t, si.unpackInfo)
@@ -144,7 +144,7 @@ func TestWriterHeaderIsCompressedAndEncrypted(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	id, si := readRawNextHeader(t, f.Name())
-	require.Equal(t, idEncodedHeader, id)
+	require.Equal(t, byte(idEncodedHeader), id)
 	require.NotNil(t, si)
 	require.Len(t, si.unpackInfo.folder, 1)
 
