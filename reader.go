@@ -600,9 +600,33 @@ func (rc *ReadCloser) Volumes() []string {
 	return volumes
 }
 
+// ReleasePool closes the folder readers that were kept for reuse after
+// [File.Open] readers were closed in the middle of a solid folder. Such a reader
+// can hold a decompression goroutine pool, so a [Reader] created by [NewReader]
+// (which has no Close) should call ReleasePool when it is done. The [Reader]
+// stays usable: the next [File.Open] simply starts a new folder reader.
+// [ReadCloser.Close] calls it itself.
+func (z *Reader) ReleasePool() error {
+	errs := make([]error, 0, len(z.pool))
+
+	for _, p := range z.pool {
+		if p != nil { // init may have failed half-way
+			errs = append(errs, p.Close())
+		}
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("sevenzip: error releasing pool: %w", err)
+	}
+
+	return nil
+}
+
 // Close closes the 7-zip file or volumes, rendering them unusable for I/O.
 func (rc *ReadCloser) Close() error {
-	errs := make([]error, 0, len(rc.f))
+	errs := make([]error, 0, len(rc.f)+1)
+
+	errs = append(errs, rc.ReleasePool())
 
 	for _, f := range rc.f {
 		errs = append(errs, f.Close())
