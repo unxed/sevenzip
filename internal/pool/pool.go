@@ -3,6 +3,7 @@ package pool
 
 import (
 	"container/list"
+	"errors"
 	"runtime"
 	"sort"
 	"sync"
@@ -14,6 +15,9 @@ import (
 type Pooler interface {
 	Get(offset int64) (util.SizeReadSeekCloser, bool)
 	Put(offset int64, rc util.SizeReadSeekCloser) (bool, error)
+	// Close closes every reader still held by the pool. The pool stays
+	// usable: it is simply empty afterwards.
+	Close() error
 }
 
 // Constructor is the function prototype used to instantiate a pool.
@@ -32,6 +36,10 @@ func (noopPool) Get(_ int64) (util.SizeReadSeekCloser, bool) {
 
 func (noopPool) Put(_ int64, rc util.SizeReadSeekCloser) (bool, error) {
 	return false, rc.Close() //nolint:wrapcheck
+}
+
+func (noopPool) Close() error {
+	return nil
 }
 
 type pool struct {
@@ -135,4 +143,17 @@ func (p *pool) removeElement(e *list.Element, cb bool) error {
 	}
 
 	return nil
+}
+
+func (p *pool) Close() error {
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
+
+	var errs []error
+
+	for ent := p.evictList.Back(); ent != nil; ent = p.evictList.Back() {
+		errs = append(errs, p.removeElement(ent, true))
+	}
+
+	return errors.Join(errs...)
 }

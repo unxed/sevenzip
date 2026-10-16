@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/unxed/sevenzip/internal/pool"
+	"github.com/unxed/sevenzip/internal/util"
 )
 
 var errAssertion = errors.New("type assertion failed")
@@ -411,4 +413,38 @@ func TestOpenReader(t *testing.T) {
 			}()
 		})
 	}
+}
+
+type recordingPool struct {
+	closed int
+	err    error
+}
+
+func (*recordingPool) Get(int64) (util.SizeReadSeekCloser, bool)        { return nil, false }
+func (*recordingPool) Put(int64, util.SizeReadSeekCloser) (bool, error) { return false, nil }
+func (p *recordingPool) Close() error                                   { p.closed++; return p.err }
+
+func TestReaderReleasePool(t *testing.T) {
+	t.Parallel()
+
+	a, b := new(recordingPool), new(recordingPool)
+	z := &Reader{pool: []pool.Pooler{a, nil, b}} // nil: init failed half-way
+
+	require.NoError(t, z.ReleasePool())
+	assert.Equal(t, 1, a.closed)
+	assert.Equal(t, 1, b.closed)
+
+	b.err = errAssertion
+	require.ErrorIs(t, z.ReleasePool(), errAssertion)
+	assert.Equal(t, 2, a.closed, "an error in one pool must not skip the others")
+}
+
+func TestReadCloserCloseReleasesPool(t *testing.T) {
+	t.Parallel()
+
+	p := new(recordingPool)
+	rc := &ReadCloser{Reader: Reader{pool: []pool.Pooler{p}}}
+
+	require.NoError(t, rc.Close())
+	assert.Equal(t, 1, p.closed)
 }
